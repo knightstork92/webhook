@@ -1,7 +1,8 @@
 const express = require("express");
 const db = require("./firebase");
 const admin = require("firebase-admin");
-const { google } = require("googleapis"); // ✅ Dùng từ googleapis
+const { google } = require("googleapis");
+
 const app = express();
 app.use(express.json());
 
@@ -21,14 +22,20 @@ app.post("/drive-webhook", async (req, res) => {
   }
 
   try {
-    // ✅ Dùng GoogleAuth đúng từ google.auth
-    const auth = new google.auth.GoogleAuth({
-      scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+    // ✅ Xác thực thủ công với Google Drive API
+    const serviceAccount = JSON.parse(
+      Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT, "base64").toString("utf8")
+    );
+
+    const auth = new google.auth.JWT({
+      email: serviceAccount.client_email,
+      key: serviceAccount.private_key,
+      scopes: ["https://www.googleapis.com/auth/drive.readonly"]
     });
 
-    const authClient = await auth.getClient();
-    const drive = google.drive({ version: "v3", auth: authClient });
+    const drive = google.drive({ version: "v3", auth });
 
+    // ✅ Lấy file mới nhất trong thư mục
     const list = await drive.files.list({
       q: `'${folderId}' in parents and trashed = false`,
       orderBy: "createdTime desc",
@@ -51,6 +58,7 @@ app.post("/drive-webhook", async (req, res) => {
 
     const code = match[1];
     const suffix = match[2] || "";
+
     const snapshot = await db.collection("orders").where("code", "==", code).limit(1).get();
     if (snapshot.empty) {
       console.log("❓ Không tìm thấy đơn:", code);
@@ -98,5 +106,6 @@ app.post("/drive-webhook", async (req, res) => {
   }
 });
 
+// Server khởi động
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Webhook đang chạy tại cổng ${PORT}`));
