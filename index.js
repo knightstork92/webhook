@@ -1,13 +1,10 @@
 const express = require("express");
 const db = require("./firebase");
 const admin = require("firebase-admin");
+const { google } = require("googleapis"); // ✅ Dùng từ googleapis
 const app = express();
 app.use(express.json());
 
-/**
- * Webhook được gọi bởi Google Drive Push Notification khi có file mới.
- * Dựa trên tên file, xác định đơn hàng và cập nhật đúng trường.
- */
 app.post("/drive-webhook", async (req, res) => {
   const folderId = req.headers["x-goog-resource-uri"]?.split("/").pop()?.split("?")[0];
   const state = req.headers["x-goog-resource-state"];
@@ -24,11 +21,11 @@ app.post("/drive-webhook", async (req, res) => {
   }
 
   try {
-    // Lấy file mới nhất trong thư mục bằng Google Drive API
-    const { google } = require("googleapis");
-    const auth = new admin.auth.GoogleAuth({
-      scopes: ["https://www.googleapis.com/auth/drive.readonly"]
+    // ✅ Dùng GoogleAuth đúng từ google.auth
+    const auth = new google.auth.GoogleAuth({
+      scopes: ["https://www.googleapis.com/auth/drive.readonly"],
     });
+
     const authClient = await auth.getClient();
     const drive = google.drive({ version: "v3", auth: authClient });
 
@@ -101,7 +98,5 @@ app.post("/drive-webhook", async (req, res) => {
   }
 });
 
-
-// Server khởi động
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Webhook đang chạy tại cổng ${PORT}`));
