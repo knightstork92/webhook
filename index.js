@@ -8,7 +8,7 @@ app.use(express.json());
 
 // 🧷 Khai báo trực tiếp folderId và serviceAccount tại đây
 const FOLDER_ID = "1s8Puh7IA2zA-vttOBJmDmx3aXIuxUsJA"; // thay bằng folder ID thật
-const SERVICE_ACCOUNT = require("./serviceAccount.json"); // để trong cùng thư mục
+const SERVICE_ACCOUNT = require("./serviceAccountKey.json"); // để trong cùng thư mục
 
 app.post("/drive-webhook", async (req, res) => {
   const state = req.headers["x-goog-resource-state"];
