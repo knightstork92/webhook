@@ -2,6 +2,10 @@ const express = require("express");
 const admin = require("firebase-admin");
 const { google } = require("googleapis");
 
+const app = express();
+app.use(express.json());
+
+// ✅ Dùng biến môi trường chứa key mã hóa base64
 const serviceAccount = JSON.parse(
   Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT, "base64").toString("utf8")
 );
@@ -11,15 +15,9 @@ admin.initializeApp({
 });
 
 const db = admin.firestore();
-
-// === Cấu hình server Express ===
-const app = express();
-app.use(express.json());
-
-// === Thay thế bằng folder ID thật của bạn ===
 const FOLDER_ID = "1s8Puh7IA2zA-vttOBJmDmx3aXIuxUsJA";
 
-// === Route webhook chính ===
+// ✅ Webhook chính
 app.post("/drive-webhook", async (req, res) => {
   const state = req.headers["x-goog-resource-state"];
   const changed = req.headers["x-goog-changed"];
@@ -34,7 +32,6 @@ app.post("/drive-webhook", async (req, res) => {
   }
 
   try {
-    // ✅ Google Drive Auth
     const auth = new google.auth.JWT({
       email: serviceAccount.client_email,
       key: serviceAccount.private_key,
@@ -43,7 +40,6 @@ app.post("/drive-webhook", async (req, res) => {
 
     const drive = google.drive({ version: "v3", auth });
 
-    // ✅ Lấy file mới nhất
     const list = await drive.files.list({
       q: `'${FOLDER_ID}' in parents and trashed = false and (mimeType contains 'video/' or mimeType contains 'image/')`,
       orderBy: "createdTime desc",
@@ -57,21 +53,27 @@ app.post("/drive-webhook", async (req, res) => {
     const fileId = file.id;
     const fileName = file.name;
     const fileUrl = `https://drive.google.com/file/d/${fileId}/view`;
-
     console.log("📄 File mới:", fileName);
 
-    // ✅ Tránh xử lý trùng
-    const check = await db.collection("processed_files").doc(fileId).get();
-    if (check.exists) {
-      console.log("⏭️ Đã xử lý file trước đó:", fileId);
-      return res.sendStatus(200);
+    // ✅ Check & Debounce xử lý file trùng
+    const processedRef = db.collection("processed_files").doc(fileId);
+    const processedSnap = await processedRef.get();
+
+    if (processedSnap.exists) {
+      const processedAt = processedSnap.data().processedAt?.toDate?.();
+      const now = new Date();
+
+      if (processedAt && now - processedAt < 30 * 1000) {
+        console.log("⏭️ File đã xử lý trong 30s:", fileId);
+        return res.sendStatus(200);
+      }
     }
-    await db.collection("processed_files").doc(fileId).set({
+
+    await processedRef.set({
       name: fileName,
       processedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    // ✅ Match tên file
     const match = fileName.match(/^([A-Z0-9]+?)(B|P\d+)?\.(mp4|mkv|jpe?g|png)$/i);
     if (!match) {
       console.log("⛔ Không đúng định dạng:", fileName);
@@ -81,7 +83,6 @@ app.post("/drive-webhook", async (req, res) => {
     const code = match[1];
     const suffix = match[2] || "";
 
-    // ✅ Tìm đơn hàng theo mã
     const snapshot = await db.collection("orders").where("code", "==", code).limit(1).get();
     if (snapshot.empty) {
       console.log("❓ Không tìm thấy đơn hàng:", code);
@@ -96,7 +97,7 @@ app.post("/drive-webhook", async (req, res) => {
     if (suffix === "B") {
       updates.videoStart = fileUrl;
     } else if (!suffix) {
-      if (data.videoEnd === fileUrl) return res.sendStatus(200); // tránh trùng
+      if (data.videoEnd === fileUrl) return res.sendStatus(200);
 
       updates.videoEnd = fileUrl;
       updates.status = "Completed";
@@ -131,6 +132,6 @@ app.post("/drive-webhook", async (req, res) => {
   }
 });
 
-// === Khởi động server ===
+// ✅ Khởi động server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Webhook server chạy tại http://localhost:${PORT}`));
