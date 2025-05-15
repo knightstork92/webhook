@@ -5,16 +5,17 @@ const { google } = require("googleapis");
 const app = express();
 app.use(express.json());
 
-// ✅ Dùng biến môi trường chứa key mã hóa base64
+// ✅ Đọc key từ biến môi trường base64
 const serviceAccount = JSON.parse(
   Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT, "base64").toString("utf8")
 );
 
+// ✅ Khởi tạo Firebase Admin
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
-
 const db = admin.firestore();
+
 const FOLDER_ID = "1s8Puh7IA2zA-vttOBJmDmx3aXIuxUsJA";
 
 // ✅ Webhook chính
@@ -32,6 +33,7 @@ app.post("/drive-webhook", async (req, res) => {
   }
 
   try {
+    // ✅ Google Drive Auth
     const auth = new google.auth.JWT({
       email: serviceAccount.client_email,
       key: serviceAccount.private_key,
@@ -40,6 +42,7 @@ app.post("/drive-webhook", async (req, res) => {
 
     const drive = google.drive({ version: "v3", auth });
 
+    // ✅ Lấy file mới nhất
     const list = await drive.files.list({
       q: `'${FOLDER_ID}' in parents and trashed = false and (mimeType contains 'video/' or mimeType contains 'image/')`,
       orderBy: "createdTime desc",
@@ -55,25 +58,28 @@ app.post("/drive-webhook", async (req, res) => {
     const fileUrl = `https://drive.google.com/file/d/${fileId}/view`;
     console.log("📄 File mới:", fileName);
 
-    // ✅ Check & Debounce xử lý file trùng
+    // ✅ Lock cứng bằng Firestore transaction
     const processedRef = db.collection("processed_files").doc(fileId);
-    const processedSnap = await processedRef.get();
-
-    if (processedSnap.exists) {
-      const processedAt = processedSnap.data().processedAt?.toDate?.();
-      const now = new Date();
-
-      if (processedAt && now - processedAt < 30 * 1000) {
-        console.log("⏭️ File đã xử lý trong 30s:", fileId);
-        return res.sendStatus(200);
+    try {
+      await db.runTransaction(async (t) => {
+        const snap = await t.get(processedRef);
+        if (snap.exists) {
+          console.log("⏭️ File đã được xử lý (transaction locked):", fileId);
+          throw new Error("already processed");
+        }
+        t.set(processedRef, {
+          name: fileName,
+          processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      });
+    } catch (err) {
+      if (err.message === "already processed") {
+        return res.sendStatus(200); // bỏ qua hợp lệ
       }
+      throw err; // lỗi khác thì ném ra ngoài
     }
 
-    await processedRef.set({
-      name: fileName,
-      processedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
+    // ✅ Xử lý file theo tên
     const match = fileName.match(/^([A-Z0-9]+?)(B|P\d+)?\.(mp4|mkv|jpe?g|png)$/i);
     if (!match) {
       console.log("⛔ Không đúng định dạng:", fileName);
