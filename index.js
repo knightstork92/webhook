@@ -1,6 +1,6 @@
 const express = require("express");
 const admin = require("firebase-admin");
-const { google } = require("googleapis");
+const { google } from require("googleapis");
 
 const app = express();
 app.use(express.json());
@@ -18,9 +18,9 @@ const db = admin.firestore();
 // 🚨 HẰNG SỐ CẤU HÌNH
 const PAGE_TOKEN_DOC = db.collection("config").doc("drivePageToken");
 const FOLDER_ID = "1s8Puh7IA2zA-vttOBJmDmx3aXIuxUsJA"; 
-const MIN_VALID_TOKEN = 100000; // Ngưỡng an toàn để tránh token lỗi như '4'
+const MIN_VALID_TOKEN = 100000; // Ngưỡng an toàn để ngăn token lỗi như '4' được lưu
 
-// ✅ Hàm xử lý file mới (Logic đơn hàng của bạn - Đảm bảo tính toàn vẹn)
+// ✅ Hàm xử lý file mới (Logic đơn hàng của bạn)
 async function processNewFile(drive, file, db, admin) {
     const fileId = file.id;
     const fileName = file.name;
@@ -28,7 +28,7 @@ async function processNewFile(drive, file, db, admin) {
 
     let code; 
 
-    // 1. Transaction Lock: Đảm bảo tệp chỉ được xử lý một lần (Logic gốc)
+    // 1. Transaction Lock: Đảm bảo tệp chỉ được xử lý một lần
     const processedRef = db.collection("processed_files").doc(fileId);
     try {
         await db.runTransaction(async (t) => {
@@ -114,7 +114,7 @@ app.post("/drive-webhook", async (req, res) => {
   // 1. Phản hồi ngay lập tức (quan trọng cho webhook)
   res.sendStatus(204); 
   
-  // 2. 🚨 LỌC: Chỉ bỏ qua 'sync' và các trạng thái không xác định.
+  // 2. LỌC: Chỉ bỏ qua 'sync' và các trạng thái không xác định.
   if (state === "sync" || !state) {
     console.log(`⏭️ Bỏ qua (Trạng thái: ${state})`);
     return;
@@ -127,8 +127,8 @@ app.post("/drive-webhook", async (req, res) => {
     let lastTokenNumber = 0; 
 
     // 4. KIỂM TRA TÍNH HỢP LỆ CỦA TOKEN CŨ
-    if (!lastPageToken || isNaN(lastPageToken)) {
-        console.error("❌ LỖI NGHIÊM TRỌNG: lastPageToken không hợp lệ trong Firestore. Vui lòng khôi phục thủ công.");
+    if (!lastPageToken || isNaN(lastPageToken) || parseInt(lastPageToken) < MIN_VALID_TOKEN) {
+        console.error(`❌ LỖI NGHIÊM TRỌNG: lastPageToken không hợp lệ (${lastPageToken}). Vui lòng khôi phục thủ công về giá trị > ${MIN_VALID_TOKEN}.`);
         return; 
     }
     lastTokenNumber = parseInt(lastPageToken);
@@ -154,12 +154,9 @@ app.post("/drive-webhook", async (req, res) => {
     
     // 7. Lọc và xử lý từng thay đổi
     for (const change of changes) {
-        // Chỉ xử lý các tệp được thêm/sửa đổi và chưa bị xóa
         if (change.removed || !change.file) continue;
 
         const file = change.file;
-        
-        // Kiểm tra tệp có nằm trong thư mục đơn hàng không và là tệp media
         const isAddedToFolder = file.parents && file.parents.includes(FOLDER_ID);
         const isMediaFile = file.mimeType && (file.mimeType.startsWith('video/') || file.mimeType.startsWith('image/'));
         
@@ -169,19 +166,18 @@ app.post("/drive-webhook", async (req, res) => {
         }
     }
 
-    // 8. 🚨 LOGIC KIỂM TRA NGHIÊM NGẶT Page Token MỚI (Khắc phục lỗi "4")
+    // 8. 🚨 LOGIC KIỂM TRA NGHIÊM NGẶT Page Token MỚI (CHỈ TẬP TRUNG NGĂN CHẶN LỖI '4')
     const newTokenNumber = parseInt(newPageToken);
 
     if (
-        newPageToken &&                                 // Phải tồn tại
-        !isNaN(newTokenNumber) &&                       // Phải là một số
-        newTokenNumber > MIN_VALID_TOKEN &&             // Phải lớn hơn 100000 (Ngưỡng an toàn)
-        newTokenNumber > lastTokenNumber                // Phải lớn hơn token cũ đang dùng
+        newPageToken &&                                 
+        !isNaN(newTokenNumber) &&                       
+        newTokenNumber > MIN_VALID_TOKEN                // Phải lớn hơn ngưỡng an toàn (100000)
     ) {
         await PAGE_TOKEN_DOC.set({ token: newPageToken });
         console.log(`✅ Đã cập nhật Page Token mới hợp lệ: ${newPageToken}`);
     } else {
-        console.warn(`⚠️ Cảnh báo: Token mới (${newPageToken}) không hợp lệ hoặc không lớn hơn token cũ. KHÔNG CẬP NHẬT TOKEN. (Ngưỡng: ${MIN_VALID_TOKEN})`);
+        console.warn(`⚠️ Cảnh báo: Token mới (${newPageToken}) không hợp lệ hoặc nhỏ hơn ngưỡng an toàn (${MIN_VALID_TOKEN}). KHÔNG CẬP NHẬT TOKEN.`);
     }
 
   } catch (error) {
