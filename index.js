@@ -18,6 +18,7 @@ const db = admin.firestore();
 // 🚨 HẰNG SỐ CẤU HÌNH
 const PAGE_TOKEN_DOC = db.collection("config").doc("drivePageToken");
 const FOLDER_ID = "1s8Puh7IA2zA-vttOBJmDmx3aXIuxUsJA"; 
+const MIN_VALID_TOKEN = 100000; // Page Token thường là một số rất lớn, đặt ngưỡng an toàn.
 
 // ✅ Hàm xử lý file mới (Logic đơn hàng của bạn)
 async function processNewFile(drive, file, db, admin) {
@@ -123,11 +124,14 @@ app.post("/drive-webhook", async (req, res) => {
     // 3. Lấy PageToken được lưu trữ mới nhất từ Firestore
     const tokenSnap = await PAGE_TOKEN_DOC.get();
     let lastPageToken = tokenSnap.exists ? tokenSnap.data().token : null;
+    let lastTokenNumber = 0; // Khởi tạo để so sánh
 
+    // ⚠️ KIỂM TRA TÍNH HỢP LỆ CỦA TOKEN CŨ
     if (!lastPageToken || isNaN(lastPageToken)) {
-        console.error("❌ LỖI KHỞI TẠO: lastPageToken không hợp lệ. Vui lòng kiểm tra lại Firestore.");
+        console.error("❌ LỖI NGHIÊM TRỌNG: lastPageToken không hợp lệ trong Firestore. Vui lòng khôi phục thủ công.");
         return; 
     }
+    lastTokenNumber = parseInt(lastPageToken);
     
     // 4. Google Drive Auth
     const auth = new google.auth.JWT({
@@ -141,7 +145,6 @@ app.post("/drive-webhook", async (req, res) => {
     // 5. Lấy danh sách thay đổi (changes) kể từ token cuối cùng
     const response = await drive.changes.list({
         pageToken: lastPageToken,
-        // ⚠️ Đảm bảo yêu cầu 'newStartPageToken' và các trường cần thiết khác
         fields: 'newStartPageToken, changes(fileId, file/id, file/name, file/parents, file/mimeType, removed, kind)',
         pageSize: 100 
     });
@@ -151,12 +154,9 @@ app.post("/drive-webhook", async (req, res) => {
     
     // 6. Lọc và xử lý từng thay đổi
     for (const change of changes) {
-        // Chỉ xử lý các tệp được thêm hoặc sửa đổi
         if (change.removed || !change.file) continue;
 
         const file = change.file;
-        
-        // Kiểm tra tệp có nằm trong thư mục đơn hàng không và là tệp media
         const isAddedToFolder = file.parents && file.parents.includes(FOLDER_ID);
         const isMediaFile = file.mimeType && (file.mimeType.startsWith('video/') || file.mimeType.startsWith('image/'));
         
@@ -166,12 +166,19 @@ app.post("/drive-webhook", async (req, res) => {
         }
     }
 
-    // 7. LƯU TRỮ pageToken MỚI (chỉ lưu nếu nó là một chuỗi số hợp lệ)
-    if (newPageToken && !isNaN(newPageToken)) {
+    // 7. 🚨 LOGIC KIỂM TRA NGHIÊM NGẶT Page Token MỚI
+    const newTokenNumber = parseInt(newPageToken);
+
+    if (
+        newPageToken &&                                 // Phải tồn tại
+        !isNaN(newTokenNumber) &&                       // Phải là một số
+        newTokenNumber > MIN_VALID_TOKEN &&             // Phải lớn hơn ngưỡng an toàn (tránh số nhỏ như '4')
+        newTokenNumber > lastTokenNumber                // Phải lớn hơn token cũ đang dùng
+    ) {
         await PAGE_TOKEN_DOC.set({ token: newPageToken });
-        console.log(`✅ Đã cập nhật Page Token mới: ${newPageToken}`);
+        console.log(`✅ Đã cập nhật Page Token mới hợp lệ: ${newPageToken}`);
     } else {
-        console.warn(`⚠️ Cảnh báo: Google Drive không trả lại Page Token mới hợp lệ (${newPageToken}). Giữ lại token cũ.`);
+        console.warn(`⚠️ Cảnh báo: Token mới (${newPageToken}) không hợp lệ hoặc nhỏ hơn token cũ (${lastPageToken}). KHÔNG CẬP NHẬT TOKEN. (Ngưỡng: ${MIN_VALID_TOKEN})`);
     }
 
   } catch (error) {
@@ -181,5 +188,5 @@ app.post("/drive-webhook", async (req, res) => {
 
 
 // ✅ Khởi động server
-const PORT = process.env.PORT || 10000; // Sử dụng port 10000 như Render log của bạn
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`🚀 Webhook server chạy tại http://localhost:${PORT}`));
