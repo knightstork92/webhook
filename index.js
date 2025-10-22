@@ -5,94 +5,137 @@ const { google } = require("googleapis");
 const app = express();
 app.use(express.json());
 
-// ✅ Đọc key từ biến môi trường base64
+// ✅ Đọc key từ biến môi trường base64 và Khởi tạo Firebase Admin
 const serviceAccount = JSON.parse(
-  Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT, "base64").toString("utf8")
+  Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT, "base64").toString("utf8")
 );
 
-// ✅ Khởi tạo Firebase Admin
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
+  credential: admin.credential.cert(serviceAccount),
 });
 const db = admin.firestore();
 
-const FOLDER_ID = "1s8Puh7IA2zA-vttOBJmDmx3aXIuxUsJA";
+// 🚨 HẰNG SỐ MỚI
+const PAGE_TOKEN_DOC = db.collection("config").doc("drivePageToken");
+const FOLDER_ID = "1s8Puh7IA2zA-vttOBJmDmx3aXIuxUsJA"; 
 
 // ✅ Webhook chính
 app.post("/drive-webhook", async (req, res) => {
-  const state = req.headers["x-goog-resource-state"];
-  const changed = req.headers["x-goog-changed"];
+  const state = req.headers["x-goog-resource-state"];
+  
+  console.log("📩 Webhook được gọi:", JSON.stringify(req.headers, null, 2));
+  console.log("📍 Trạng thái:", state);
 
-  console.log("📩 Webhook được gọi:", JSON.stringify(req.headers, null, 2));
-  console.log("📍 Trạng thái:", state);
-  console.log("🔄 Changed:", changed);
+  // 1. Phản hồi ngay lập tức và xử lý bất đồng bộ
+  res.sendStatus(204); 
+  
+  // 2. Bỏ qua thông báo đồng bộ hóa và các trạng thái không liên quan
+  if (state === "sync" || (state !== "change" && state !== "update" && state !== "add")) {
+    console.log(`⏭️ Bỏ qua (Trạng thái: ${state})`);
+    return;
+  }
 
-  if (state !== "update" || changed !== "children") {
-    console.log("⏭️ Không phải sự kiện thêm file");
-    return res.sendStatus(200);
-  }
+  try {
+    // 3. Lấy PageToken được lưu trữ mới nhất từ Firestore
+    const tokenSnap = await PAGE_TOKEN_DOC.get();
+    let lastPageToken = tokenSnap.exists ? tokenSnap.data().token : null;
 
-  try {
-    // ✅ Google Drive Auth
-    const auth = new google.auth.JWT({
-      email: serviceAccount.client_email,
-      key: serviceAccount.private_key,
-      scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+    if (!lastPageToken) {
+        console.error("❌ LỖI: lastPageToken chưa được khởi tạo trong Firestore. Vui lòng kiểm tra Bước 1.3!");
+        return; 
+    }
+    
+    // 4. Google Drive Auth
+    const auth = new google.auth.JWT({
+      email: serviceAccount.client_email,
+      key: serviceAccount.private_key,
+      scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+    });
+
+    const drive = google.drive({ version: "v3", auth });
+    
+    // 5. Lấy danh sách thay đổi (changes) kể từ token cuối cùng
+    const response = await drive.changes.list({
+        pageToken: lastPageToken,
+        fields: 'newStartPageToken, changes(fileId, file/id, file/name, file/parents, file/mimeType, removed, kind)',
+        pageSize: 100 // Tăng lên 100 để xử lý hàng loạt
     });
 
-    const drive = google.drive({ version: "v3", auth });
+    const newPageToken = response.data.newStartPageToken;
+    const changes = response.data.changes || [];
+    
+    // 6. Lọc và xử lý từng thay đổi
+    for (const change of changes) {
+        // Chỉ xử lý các tệp được thêm hoặc sửa đổi và chưa bị xóa
+        if (change.removed || !change.file) continue;
 
-    // ✅ Lấy file mới nhất
-    const list = await drive.files.list({
-      q: `'${FOLDER_ID}' in parents and trashed = false and (mimeType contains 'video/' or mimeType contains 'image/')`,
-      orderBy: "createdTime desc",
-      pageSize: 1,
-      fields: "files(id,name,mimeType)",
-    });
+        const file = change.file;
+        
+        // Kiểm tra tệp có nằm trong thư mục đơn hàng không và là tệp media
+        const isAddedToFolder = file.parents && file.parents.includes(FOLDER_ID);
+        const isMediaFile = file.mimeType && (file.mimeType.startsWith('video/') || file.mimeType.startsWith('image/'));
+        
+        if (isAddedToFolder && isMediaFile) {
+            console.log(`🔎 Tìm thấy tệp mới cần xử lý: ${file.name} (ID: ${file.id})`);
+            await processNewFile(drive, file, db, admin); 
+        }
+    }
 
-    const file = list.data.files?.[0];
-    if (!file) return res.sendStatus(200);
+    // 7. LƯU TRỮ pageToken MỚI cho lần gọi Webhook tiếp theo
+    if (newPageToken) {
+        await PAGE_TOKEN_DOC.set({ token: newPageToken });
+        console.log(`✅ Đã cập nhật Page Token mới: ${newPageToken}`);
+    }
 
+  } catch (error) {
+    console.error("❌ Lỗi xử lý webhook:", error);
+  }
+});
+
+
+// ✅ Hàm xử lý file mới (Logic đơn hàng của bạn)
+async function processNewFile(drive, file, db, admin) {
     const fileId = file.id;
     const fileName = file.name;
     const fileUrl = `https://drive.google.com/file/d/${fileId}/view`;
-    console.log("📄 File mới:", fileName);
+
+    let code; // Khai báo code ở đây để có thể log ở cuối
 
     // ✅ Lock cứng bằng Firestore transaction
     const processedRef = db.collection("processed_files").doc(fileId);
     try {
-      await db.runTransaction(async (t) => {
-        const snap = await t.get(processedRef);
-        if (snap.exists) {
-          console.log("⏭️ File đã được xử lý (transaction locked):", fileId);
-          throw new Error("already processed");
-        }
-        t.set(processedRef, {
-          name: fileName,
-          processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        await db.runTransaction(async (t) => {
+            const snap = await t.get(processedRef);
+            if (snap.exists) {
+                console.log("⏭️ File đã được xử lý (transaction locked):", fileId);
+                throw new Error("already processed");
+            }
+            t.set(processedRef, {
+                name: fileName,
+                processedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
         });
-      });
     } catch (err) {
-      if (err.message === "already processed") {
-        return res.sendStatus(200); // bỏ qua hợp lệ
-      }
-      throw err; // lỗi khác thì ném ra ngoài
+        if (err.message === "already processed") {
+            return; 
+        }
+        throw err; 
     }
 
-    // ✅ Xử lý file theo tên
+    // ✅ Xử lý file theo tên (Logic cũ của bạn)
     const match = fileName.match(/^([A-Z0-9]+?)(B|P\d+)?\.(mp4|mkv|jpe?g|png)$/i);
     if (!match) {
-      console.log("⛔ Không đúng định dạng:", fileName);
-      return res.sendStatus(200);
+        console.log("⛔ Không đúng định dạng:", fileName);
+        return; 
     }
 
-    const code = match[1];
+    code = match[1];
     const suffix = match[2] || "";
 
     const snapshot = await db.collection("orders").where("code", "==", code).limit(1).get();
     if (snapshot.empty) {
-      console.log("❓ Không tìm thấy đơn hàng:", code);
-      return res.sendStatus(200);
+        console.log("❓ Không tìm thấy đơn hàng:", code);
+        return; 
     }
 
     const doc = snapshot.docs[0];
@@ -101,42 +144,38 @@ app.post("/drive-webhook", async (req, res) => {
     const now = new Date();
 
     if (suffix === "B") {
-      updates.videoStart = fileUrl;
+        updates.videoStart = fileUrl;
     } else if (!suffix) {
-      if (data.videoEnd === fileUrl) return res.sendStatus(200);
+        if (data.videoEnd === fileUrl) return; 
 
-      updates.videoEnd = fileUrl;
-      updates.status = "Completed";
-      updates.completedAt = admin.firestore.Timestamp.fromDate(now);
+        updates.videoEnd = fileUrl;
+        updates.status = "Completed";
+        updates.completedAt = admin.firestore.Timestamp.fromDate(now);
 
-      if (data.createdAt?.toDate) {
-        const created = data.createdAt.toDate();
-        const durationMinutes = Math.round((now - created) / (1000 * 60));
-        updates.duration = durationMinutes;
-      }
+        if (data.createdAt?.toDate) {
+            const created = data.createdAt.toDate();
+            const durationMinutes = Math.round((now - created) / (1000 * 60));
+            updates.duration = durationMinutes;
+        }
 
-      await db.collection("notifications").add({
-        message: `Đơn hàng ${code} đã hoàn thành.`,
-        orderId: doc.id,
-        partner: data.partner || "",
-        readBy: [],
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      });
+        await db.collection("notifications").add({
+            message: `Đơn hàng ${code} đã hoàn thành.`,
+            orderId: doc.id,
+            partner: data.partner || "",
+            readBy: [],
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        });
     } else if (suffix.startsWith("P")) {
-      const extra = data.extraVideos || [];
-      if (extra.find(v => v.name === fileName)) return res.sendStatus(200);
-      extra.push({ name: fileName, url: fileUrl });
-      updates.extraVideos = extra;
+        const extra = data.extraVideos || [];
+        if (extra.find(v => v.name === fileName)) return; 
+        extra.push({ name: fileName, url: fileUrl });
+        updates.extraVideos = extra;
     }
 
     await doc.ref.update(updates);
     console.log("✅ Đã cập nhật đơn:", code);
-    return res.sendStatus(200);
-  } catch (error) {
-    console.error("❌ Lỗi xử lý webhook:", error);
-    return res.status(500).send("Internal Server Error");
-  }
-});
+}
+
 
 // ✅ Khởi động server
 const PORT = process.env.PORT || 3000;
