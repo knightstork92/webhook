@@ -18,9 +18,9 @@ const db = admin.firestore();
 // 🚨 HẰNG SỐ CẤU HÌNH
 const PAGE_TOKEN_DOC = db.collection("config").doc("drivePageToken");
 const FOLDER_ID = "1s8Puh7IA2zA-vttOBJmDmx3aXIuxUsJA"; 
-const MIN_VALID_TOKEN = 100000; // Page Token thường là một số rất lớn, đặt ngưỡng an toàn.
+const MIN_VALID_TOKEN = 100000; // Ngưỡng an toàn để tránh token lỗi như '4'
 
-// ✅ Hàm xử lý file mới (Logic đơn hàng của bạn)
+// ✅ Hàm xử lý file mới (Logic đơn hàng của bạn - Đảm bảo tính toàn vẹn)
 async function processNewFile(drive, file, db, admin) {
     const fileId = file.id;
     const fileName = file.name;
@@ -28,7 +28,7 @@ async function processNewFile(drive, file, db, admin) {
 
     let code; 
 
-    // ✅ Lock cứng bằng Firestore transaction để đảm bảo chỉ xử lý 1 lần
+    // 1. Transaction Lock: Đảm bảo tệp chỉ được xử lý một lần (Logic gốc)
     const processedRef = db.collection("processed_files").doc(fileId);
     try {
         await db.runTransaction(async (t) => {
@@ -49,7 +49,7 @@ async function processNewFile(drive, file, db, admin) {
         throw err; 
     }
 
-    // ✅ Xử lý file theo tên (Logic cũ của bạn)
+    // 2. Xử lý file theo tên (Logic gốc)
     const match = fileName.match(/^([A-Z0-9]+?)(B|P\d+)?\.(mp4|mkv|jpe?g|png)$/i);
     if (!match) {
         console.log("⛔ Không đúng định dạng:", fileName);
@@ -114,8 +114,8 @@ app.post("/drive-webhook", async (req, res) => {
   // 1. Phản hồi ngay lập tức (quan trọng cho webhook)
   res.sendStatus(204); 
   
-  // 2. Lọc thông báo không liên quan
-  if (state === "sync" || (state !== "change" && state !== "update" && state !== "add")) {
+  // 2. 🚨 LỌC: Chỉ bỏ qua 'sync' và các trạng thái không xác định.
+  if (state === "sync" || !state) {
     console.log(`⏭️ Bỏ qua (Trạng thái: ${state})`);
     return;
   }
@@ -124,16 +124,16 @@ app.post("/drive-webhook", async (req, res) => {
     // 3. Lấy PageToken được lưu trữ mới nhất từ Firestore
     const tokenSnap = await PAGE_TOKEN_DOC.get();
     let lastPageToken = tokenSnap.exists ? tokenSnap.data().token : null;
-    let lastTokenNumber = 0; // Khởi tạo để so sánh
+    let lastTokenNumber = 0; 
 
-    // ⚠️ KIỂM TRA TÍNH HỢP LỆ CỦA TOKEN CŨ
+    // 4. KIỂM TRA TÍNH HỢP LỆ CỦA TOKEN CŨ
     if (!lastPageToken || isNaN(lastPageToken)) {
         console.error("❌ LỖI NGHIÊM TRỌNG: lastPageToken không hợp lệ trong Firestore. Vui lòng khôi phục thủ công.");
         return; 
     }
     lastTokenNumber = parseInt(lastPageToken);
     
-    // 4. Google Drive Auth
+    // 5. Google Drive Auth
     const auth = new google.auth.JWT({
       email: serviceAccount.client_email,
       key: serviceAccount.private_key,
@@ -142,7 +142,7 @@ app.post("/drive-webhook", async (req, res) => {
 
     const drive = google.drive({ version: "v3", auth });
     
-    // 5. Lấy danh sách thay đổi (changes) kể từ token cuối cùng
+    // 6. Lấy danh sách thay đổi (changes) kể từ token cuối cùng
     const response = await drive.changes.list({
         pageToken: lastPageToken,
         fields: 'newStartPageToken, changes(fileId, file/id, file/name, file/parents, file/mimeType, removed, kind)',
@@ -152,11 +152,14 @@ app.post("/drive-webhook", async (req, res) => {
     const newPageToken = response.data.newStartPageToken;
     const changes = response.data.changes || [];
     
-    // 6. Lọc và xử lý từng thay đổi
+    // 7. Lọc và xử lý từng thay đổi
     for (const change of changes) {
+        // Chỉ xử lý các tệp được thêm/sửa đổi và chưa bị xóa
         if (change.removed || !change.file) continue;
 
         const file = change.file;
+        
+        // Kiểm tra tệp có nằm trong thư mục đơn hàng không và là tệp media
         const isAddedToFolder = file.parents && file.parents.includes(FOLDER_ID);
         const isMediaFile = file.mimeType && (file.mimeType.startsWith('video/') || file.mimeType.startsWith('image/'));
         
@@ -166,19 +169,19 @@ app.post("/drive-webhook", async (req, res) => {
         }
     }
 
-    // 7. 🚨 LOGIC KIỂM TRA NGHIÊM NGẶT Page Token MỚI
+    // 8. 🚨 LOGIC KIỂM TRA NGHIÊM NGẶT Page Token MỚI (Khắc phục lỗi "4")
     const newTokenNumber = parseInt(newPageToken);
 
     if (
         newPageToken &&                                 // Phải tồn tại
         !isNaN(newTokenNumber) &&                       // Phải là một số
-        newTokenNumber > MIN_VALID_TOKEN &&             // Phải lớn hơn ngưỡng an toàn (tránh số nhỏ như '4')
+        newTokenNumber > MIN_VALID_TOKEN &&             // Phải lớn hơn 100000 (Ngưỡng an toàn)
         newTokenNumber > lastTokenNumber                // Phải lớn hơn token cũ đang dùng
     ) {
         await PAGE_TOKEN_DOC.set({ token: newPageToken });
         console.log(`✅ Đã cập nhật Page Token mới hợp lệ: ${newPageToken}`);
     } else {
-        console.warn(`⚠️ Cảnh báo: Token mới (${newPageToken}) không hợp lệ hoặc nhỏ hơn token cũ (${lastPageToken}). KHÔNG CẬP NHẬT TOKEN. (Ngưỡng: ${MIN_VALID_TOKEN})`);
+        console.warn(`⚠️ Cảnh báo: Token mới (${newPageToken}) không hợp lệ hoặc không lớn hơn token cũ. KHÔNG CẬP NHẬT TOKEN. (Ngưỡng: ${MIN_VALID_TOKEN})`);
     }
 
   } catch (error) {
