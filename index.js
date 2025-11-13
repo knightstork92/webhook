@@ -16,7 +16,7 @@ admin.initializeApp({
 const db = admin.firestore();
 
 // 🚨 HẰNG SỐ CẤU HÌNH
-const FOLDER_ID = "1s8Puh7IA2zA-vttOBJmDmx3aXIuxUsJA"; 
+const FOLDER_ID = "10vX845ZsB0cfryOHdq17BnkjdY4_MdKk"; 
 
 // ✅ Webhook chính
 app.post("/drive-webhook", async (req, res) => {
